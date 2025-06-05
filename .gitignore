@@ -1,0 +1,26 @@
+# Ignore extracted license plate images
+plates/
+
+# Ignore other common files
+*.pyc
+__pycache__/
+*.log
+*.csv
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Ignore model files (if you don't want to track them)
+*.pt
+*.onnx
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
