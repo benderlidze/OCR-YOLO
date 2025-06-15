@@ -11,9 +11,32 @@ from datetime import datetime, timedelta
 import time
 from fast_plate_ocr import ONNXPlateRecognizer
 import csv
+import torch
 
-# Initialize fast-plate-ocr recognizer
-m = ONNXPlateRecognizer('european-plates-mobile-vit-v2-model')  # Load the ONNX model for OCR
+# GPU Information
+print("=" * 50)
+print("GPU/CUDA INFORMATION")
+print("=" * 50)
+print(f"PyTorch version: {torch.__version__}")
+print(f"CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"CUDA version: {torch.version.cuda}")
+    print(f"GPU count: {torch.cuda.device_count()}")
+    for i in range(torch.cuda.device_count()):
+        print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
+        print(f"GPU {i} Memory: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f} GB")
+else:
+    print("No CUDA GPUs detected")
+print("=" * 50)
+
+# Initialize fast-plate-ocr recognizer with GPU acceleration
+try:
+    # Try to use GPU first
+    m = ONNXPlateRecognizer('european-plates-mobile-vit-v2-model', providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+    print("✓ fast-plate-ocr: GPU acceleration enabled")
+except Exception as e:
+    print(f"⚠ fast-plate-ocr: GPU acceleration failed, falling back to CPU: {e}")
+    m = ONNXPlateRecognizer('european-plates-mobile-vit-v2-model')  # Fallback to CPU
 
 # Create output directory for plates
 os.makedirs("plates", exist_ok=True)
@@ -27,7 +50,7 @@ with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
 
 # Frame processing control
 frame_count = 0
-process_every_n_frames = 5  # Process every 5th frame for speed
+process_every_n_frames = 10  # Process every 5th frame for speed
 
 
 # RTSP Camera Information
@@ -50,9 +73,23 @@ CREATE TABLE IF NOT EXISTS plates (
 ''')
 conn.commit()
 
-# Load the model
+# Load the model with GPU acceleration
 model_path = 'best.pt'
+
+# Check if CUDA is available
+import torch
+if torch.cuda.is_available():
+    device = 'cuda'
+    print(f"✓ CUDA GPU available: {torch.cuda.get_device_name(0)}")
+    print(f"✓ CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+else:
+    device = 'cpu'
+    print("⚠ CUDA not available, using CPU")
+
+# Load YOLO model with GPU support
 model = YOLO(model_path)
+model.to(device)  # Move model to GPU
+print(f"✓ YOLO model loaded on: {device.upper()}")
 
 # Initialize EasyOCR reader
 reader = easyocr.Reader(['tr'])
@@ -64,9 +101,8 @@ def process_image(img):
     frame_count += 1
     
     # Only process every 5th frame for speed optimization
-    if frame_count % process_every_n_frames == 0:
-        # Make predictions using the model
-        results = model(img)
+    if frame_count % process_every_n_frames == 0:        # Make predictions using the model with GPU acceleration
+        results = model(img, device=device)
         
         # Extract and save detected plates
         for box in results[0].boxes.xyxy.cpu().numpy():

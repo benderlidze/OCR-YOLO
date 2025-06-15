@@ -1,8 +1,10 @@
 # Ignore extracted license plate images
-plates/
+
 output_directory/
 captured_images/
 plates_rtsp/
+venv/
+plates/
 
 # Ignore other common files
 *.pyc
