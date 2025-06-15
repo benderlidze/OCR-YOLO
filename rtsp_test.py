@@ -1,105 +1,60 @@
-#!/usr/bin/env python3
-"""
-Simple RTSP Stream Test Script
-Tests basic connectivity to the RTSP stream without AI models
-"""
-
-import cv2
+import vlc
 import time
+import cv2
+import numpy as np
 
-# RTSP Stream configuration
 RTSP_URL = "rtsp://admin:Rade13245@213.5.194.11:100/Streaming/Channels/101"
 
-def test_rtsp_connection():
-    print(f"Testing RTSP connection to: {RTSP_URL}")
-    print("Attempting to connect...")
+def stream_with_vlc():
+    """Stream RTSP using VLC backend"""
     
-    # Create VideoCapture object
-    cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
+    # Create VLC instance with network options
+    vlc_args = [
+        '--intf', 'dummy',
+        '--no-audio',
+        '--network-caching=300',
+        '--rtsp-tcp',  # Force TCP for RTSP
+        '--live-caching=300'
+    ]
     
-    # Set some basic properties
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
-    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+    instance = vlc.Instance(vlc_args)
+    player = instance.media_player_new()
     
-    if not cap.isOpened():
-        print("❌ Failed to connect to RTSP stream")
-        print("Possible issues:")
-        print("1. Network connectivity")
-        print("2. Incorrect credentials")
-        print("3. Camera is offline")
-        print("4. Firewall blocking connection")
-        print("5. RTSP URL format incorrect")
-        return False
+    # Create media
+    media = instance.media_new(RTSP_URL)
+    player.set_media(media)
     
-    print("✅ Successfully connected to RTSP stream!")
+    print("Starting VLC RTSP stream...")
+    player.play()
     
-    # Get stream properties
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    
-    print(f"Stream Properties:")
-    print(f"  FPS: {fps}")
-    print(f"  Resolution: {int(width)}x{int(height)}")
-    
-    frame_count = 0
-    start_time = time.time()
+    # Wait for stream to start
+    time.sleep(3)
     
     try:
-        print("\nStarting stream viewer...")
-        print("Press 'q' to quit, 's' to save frame")
-        
         while True:
-            ret, frame = cap.read()
+            state = player.get_state()
             
-            if not ret:
-                print("❌ Failed to read frame")
+            if state == vlc.State.Playing:
+                print("✓ Stream is playing")
                 break
+            elif state == vlc.State.Error:
+                print("✗ VLC error occurred")
+                return
+            elif state == vlc.State.Ended:
+                print("Stream ended")
+                return
             
-            frame_count += 1
-            
-            # Add overlay text
-            cv2.putText(frame, f"Frame: {frame_count}", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.putText(frame, "RTSP Stream Test", (10, 70), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-            
-            # Show every 10th frame info
-            if frame_count % 30 == 0:
-                elapsed = time.time() - start_time
-                current_fps = frame_count / elapsed if elapsed > 0 else 0
-                print(f"Frames: {frame_count}, FPS: {current_fps:.1f}")
-            
-            # Display frame
-            cv2.imshow("RTSP Stream Test", frame)
-            
-            # Handle keys
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                print("Quit requested")
-                break
-            elif key == ord('s'):
-                filename = f"rtsp_frame_{frame_count}.jpg"
-                cv2.imwrite(filename, frame)
-                print(f"Frame saved as {filename}")
-    
-    except KeyboardInterrupt:
-        print("\nInterrupted by user")
-    except Exception as e:
-        print(f"Error during streaming: {e}")
-    finally:
-        total_time = time.time() - start_time
-        print(f"\nSession complete:")
-        print(f"  Total frames: {frame_count}")
-        print(f"  Duration: {total_time:.1f}s")
-        print(f"  Average FPS: {frame_count/total_time:.1f}" if total_time > 0 else "  Average FPS: N/A")
+            time.sleep(0.5)
         
-        cap.release()
-        cv2.destroyAllWindows()
+        # Keep alive
+        input("Stream is running. Press Enter to stop...")
+        
+    except KeyboardInterrupt:
+        print("Interrupted")
     
-    return True
+    finally:
+        player.stop()
+        print("VLC stream stopped")
 
 if __name__ == "__main__":
-    print("=== RTSP Stream Connection Test ===")
-    test_rtsp_connection()
+    stream_with_vlc()
