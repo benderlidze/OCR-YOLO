@@ -10,24 +10,7 @@ import sqlite3
 from datetime import datetime, timedelta
 import time
 from fast_plate_ocr import ONNXPlateRecognizer
-import csv
-
-# Initialize fast-plate-ocr recognizer
 m = ONNXPlateRecognizer('european-plates-mobile-vit-v2-model')  # Load the ONNX model for OCR
-
-# Create output directory for plates
-os.makedirs("plates", exist_ok=True)
-plate_count = 0
-
-# Initialize CSV file for results
-csv_filename = "detection_results.csv"
-with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-    writer = csv.writer(csvfile)
-    writer.writerow(['Plate_ID', 'Detected_Text', 'Confidence_Score', 'Image_Path'])
-
-# Frame processing control
-frame_count = 0
-process_every_n_frames = 5  # Process every 5th frame for speed
 
 
 # RTSP Camera Information
@@ -59,71 +42,83 @@ reader = easyocr.Reader(['tr'])
 
 # Image processing function
 def process_image(img):
-    global plate_count, frame_count
-    
-    frame_count += 1
-    
-    # Only process every 5th frame for speed optimization
-    if frame_count % process_every_n_frames == 0:
-        # Make predictions using the model
-        results = model(img)
-        
-        # Extract and save detected plates
-        for box in results[0].boxes.xyxy.cpu().numpy():
-            x1, y1, x2, y2 = map(int, box[:4])
-            plate_img = img[y1:y2, x1:x2]
-            if plate_img.size > 0:
-                # Save the plate image
-                plate_path = f"plates/plate_{plate_count}.jpg"
-                cv2.imwrite(plate_path, plate_img)
-                
-                # Perform OCR using fast-plate-ocr
-                try:
-                    # Use return_confidence=True to get real confidence scores
-                    ocr_result = m.run(plate_path, return_confidence=True)
-                    if ocr_result and len(ocr_result) == 2 and len(ocr_result[0]) > 0:
-                        plate_text = ocr_result[0][0]  # First detected text
-                        confidence_scores = ocr_result[1][0]  # Confidence scores for each character
-                        # Calculate average confidence across all characters
-                        best_confidence = float(confidence_scores.mean())
-                    else:
-                        plate_text = ""
-                        best_confidence = 0.0
-                except Exception as e:
-                    print(f"OCR error for plate {plate_count}: {e}")
-                    plate_text = ""
-                    best_confidence = 0.0
-                
-                # Save results to CSV
-                with open(csv_filename, 'a', newline='', encoding='utf-8') as csvfile:
-                    writer = csv.writer(csvfile)
-                    writer.writerow([
-                        f"plate_{plate_count}",
-                        plate_text if plate_text else "No text detected",
-                        f"{best_confidence:.3f}",
-                        plate_path
-                    ])
-                
-                # Draw the detected box
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                
-                # Add detected text to the image
-                if plate_text:
-                    display_text = f"{plate_text} ({best_confidence:.3f})"
-                    cv2.putText(img, display_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
-                    print(f"Frame {frame_count} - Detected plate #{plate_count}: {plate_text} (Confidence: {best_confidence:.3f})")
+    # Make predictions using the model
+    results = model(img)
+
+    for result in results:
+        boxes = result.boxes.xyxy
+        for box in boxes:
+            x1, y1, x2, y2 = map(int, box)
+            # Draw the detected box
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 3)  # Increase thickness
+
+            # Crop the box and apply OCR
+            img_pil = Image.fromarray(img)
+            cropped_image = img_pil.crop((x1, y1, x2, y2))
+            image_np = np.array(cropped_image)
+
+            # Perform OCR
+            result = reader.readtext(image_np)
+
+            result_text = ""
+            max_confidence = 0.0
+            for detection in result:
+                text = detection[1]
+                confidence = detection[2]
+                result_text += text  # Concatenate texts
+                if confidence > max_confidence:
+                    max_confidence = confidence
+
+            # Remove spaces and convert to uppercase
+            result_text = result_text.replace(" ", "").upper()
+            result_text = result_text.replace("-", "")
+
+            # Search for Turkish license plate format
+            match = re.search(r'\d{2}[A-Z]{1,3}\d{2,4}', result_text)
+
+            if match and max_confidence > 0.75:
+                plate = match.group(0)
+                accuracy = int(max_confidence * 100)  # Convert to percentage
+
+                # Add plate to the image
+                display_text = f"{plate} %{accuracy}"
+                cv2.putText(img, display_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)  # Increase font size and thickness
+
+                # Check the plate in the database
+                c.execute("SELECT * FROM plates WHERE plate=? ORDER BY entry_time DESC LIMIT 1", (plate,))
+                plate_record = c.fetchone()
+
+                current_time = datetime.now()
+                current_time_str = current_time.strftime("%Y-%m-%d %H:%M:%S")
+
+                if plate_record is None:
+                    # New plate, record entry time
+                    c.execute("INSERT INTO plates (plate, entry_time, exit_time) VALUES (?, ?, NULL)", (plate, current_time_str))
+                    print(f"New plate detected: {plate}, entry time: {current_time_str}")
                 else:
-                    cv2.putText(img, "Plate Not Detected!", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
-                    print(f"Frame {frame_count} - Plate #{plate_count}: No text detected")
-                
-                plate_count += 1
-        
-        # Visualize results
-        annotated_frame = results[0].plot()
-        return annotated_frame
-    else:
-        # For frames we don't process, just return the original frame
-        return img
+                    last_entry_time = datetime.strptime(plate_record[2], "%Y-%m-%d %H:%M:%S")
+                    if plate_record[3] is None:
+                        # Exit time not recorded yet
+                        if current_time - last_entry_time > timedelta(minutes=2):
+                            c.execute("UPDATE plates SET exit_time=? WHERE plate=?", (current_time_str, plate))
+                            print(f"Plate exited: {plate}, exit time: {current_time_str}")
+                        else:
+                            print(f"Plate {plate} exit ignored due to 2-minute rule.")
+                    else:
+                        # Exit time recorded, check for new entry
+                        last_exit_time = datetime.strptime(plate_record[3], "%Y-%m-%d %H:%M:%S")
+                        if current_time - last_exit_time > timedelta(minutes=2):
+                            c.execute("INSERT INTO plates (plate, entry_time, exit_time) VALUES (?, ?, NULL)", (plate, current_time_str))
+                            print(f"Plate re-entered: {plate}, entry time: {current_time_str}")
+                        else:
+                            print(f"Plate {plate} entry ignored due to 2-minute rule.")
+
+                conn.commit()
+
+            else:
+                cv2.putText(img, "Plate Not Detected!", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)  # Increase font size and thickness
+
+    return img
 
 # Video processing function
 def process_video(video_path, output_path):

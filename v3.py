@@ -1,42 +1,15 @@
 import cv2
-from ultralytics import YOLO
-import matplotlib.pyplot as plt
+from open_image_models import LicensePlateDetector
 import os
-from PIL import Image
-import easyocr
-import numpy as np
-import re
-import sqlite3
-from datetime import datetime, timedelta
-import time
 from fast_plate_ocr import ONNXPlateRecognizer
 import csv
-import torch
 
-# GPU Information
-print("=" * 50)
-print("GPU/CUDA INFORMATION")
-print("=" * 50)
-print(f"PyTorch version: {torch.__version__}")
-print(f"CUDA available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"CUDA version: {torch.version.cuda}")
-    print(f"GPU count: {torch.cuda.device_count()}")
-    for i in range(torch.cuda.device_count()):
-        print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
-        print(f"GPU {i} Memory: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f} GB")
-else:
-    print("No CUDA GPUs detected")
-print("=" * 50)
+# Load YOLOv9-t-384-license-plate-end2end model from open-image-models
+print("Initializing YOLOv9-t-384-license-plate-end2end detector...")
+model = LicensePlateDetector(detection_model="yolo-v9-t-384-license-plate-end2end")
 
-# Initialize fast-plate-ocr recognizer with GPU acceleration
-try:
-    # Try to use GPU first
-    m = ONNXPlateRecognizer('european-plates-mobile-vit-v2-model', providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-    print("✓ fast-plate-ocr: GPU acceleration enabled")
-except Exception as e:
-    print(f"⚠ fast-plate-ocr: GPU acceleration failed, falling back to CPU: {e}")
-    m = ONNXPlateRecognizer('european-plates-mobile-vit-v2-model')  # Fallback to CPU
+# Initialize fast-plate-ocr recognizer
+m = ONNXPlateRecognizer('european-plates-mobile-vit-v2-model')  # Load the ONNX model for OCR
 
 # Create output directory for plates
 os.makedirs("plates", exist_ok=True)
@@ -46,220 +19,89 @@ plate_count = 0
 csv_filename = "detection_results.csv"
 with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
     writer = csv.writer(csvfile)
-    writer.writerow(['Plate_ID', 'Detected_Text', 'Confidence_Score', 'Image_Path'])
+    writer.writerow(['Plate_ID', 'Frame_Number', 'Detected_Text', 'OCR_Confidence', 'Detection_Confidence', 'Image_Path'])
 
 # Frame processing control
 frame_count = 0
-process_every_n_frames = 10  # Process every 5th frame for speed
+process_every_n_frames = 2  # Process every 5th frame for speed
 
+# Open video stream (0 = default webcam, or provide path to video file)
+cap = cv2.VideoCapture("20250605-1135-195857578_JpNYpqrH.mp4")  # Change to a video file path if needed
 
-# RTSP Camera Information
-rtsp_url = "rtsp://admin:Rade13245@213.5.194.11:100/Streaming/Channels/101"
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-# Connect to SQLite database
-db_file = 'license_plates.db'
-conn = sqlite3.connect(db_file)
-c = conn.cursor()
-
-# Create table if it doesn't exist
-c.execute('''
-CREATE TABLE IF NOT EXISTS plates (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    plate TEXT,
-    entry_time TEXT,
-    exit_time TEXT,
-    UNIQUE(plate, entry_time)
-)
-''')
-conn.commit()
-
-# Load the model with GPU acceleration
-model_path = 'best.pt'
-
-# Check if CUDA is available
-import torch
-if torch.cuda.is_available():
-    device = 'cuda'
-    print(f"✓ CUDA GPU available: {torch.cuda.get_device_name(0)}")
-    print(f"✓ CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-else:
-    device = 'cpu'
-    print("⚠ CUDA not available, using CPU")
-
-# Load YOLO model with GPU support
-model = YOLO(model_path)
-model.to(device)  # Move model to GPU
-print(f"✓ YOLO model loaded on: {device.upper()}")
-
-# Initialize EasyOCR reader
-reader = easyocr.Reader(['tr'])
-
-# Image processing function
-def process_image(img):
-    global plate_count, frame_count
-    
     frame_count += 1
-    
-    # Only process every 5th frame for speed optimization
-    if frame_count % process_every_n_frames == 0:        # Make predictions using the model with GPU acceleration
-        results = model(img, device=device)
-        
-        # Extract and save detected plates
-        for box in results[0].boxes.xyxy.cpu().numpy():
-            x1, y1, x2, y2 = map(int, box[:4])
-            plate_img = img[y1:y2, x1:x2]
-            if plate_img.size > 0:
-                # Save the plate image
-                plate_path = f"plates/plate_{plate_count}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}.jpg"
-                cv2.imwrite(plate_path, plate_img)
+      # Only process every 5th frame for speed optimization
+    if frame_count % process_every_n_frames == 0:
+        # Run YOLOv9 inference using open-image-models
+        detections = model.predict(frame)        # Extract and save detected plates
+        if detections is not None and len(detections) > 0:
+            for detection in detections:
+                # Extract bounding box coordinates from detection object
+                # DetectionResult has bounding_box attribute with x1, y1, x2, y2 properties
+                bbox = detection.bounding_box
+                x1, y1, x2, y2 = bbox.x1, bbox.y1, bbox.x2, bbox.y2
                 
-                # Perform OCR using fast-plate-ocr
-                try:
-                    # Use return_confidence=True to get real confidence scores
-                    ocr_result = m.run(plate_path, return_confidence=True)
-                    if ocr_result and len(ocr_result) == 2 and len(ocr_result[0]) > 0:
-                        plate_text = ocr_result[0][0]  # First detected text
-                        confidence_scores = ocr_result[1][0]  # Confidence scores for each character
-                        # Calculate average confidence across all characters
-                        best_confidence = float(confidence_scores.mean())
-                    else:
+                # Extract plate region from frame
+                plate_img = frame[y1:y2, x1:x2]
+                
+                if plate_img.size > 0:
+                    # Save the plate image
+                    plate_path = f"plates/plate_{plate_count}.jpg"
+                    cv2.imwrite(plate_path, plate_img)
+                    
+                    # Perform OCR using fast-plate-ocr
+                    try:
+                        # Use return_confidence=True to get real confidence scores
+                        ocr_result = m.run(plate_path, return_confidence=True)
+                        if ocr_result and len(ocr_result) == 2 and len(ocr_result[0]) > 0:
+                            plate_text = ocr_result[0][0]  # First detected text
+                            confidence_scores = ocr_result[1][0]  # Confidence scores for each character
+                            # Calculate average confidence across all characters
+                            best_confidence = float(confidence_scores.mean())
+                        else:
+                            plate_text = ""
+                            best_confidence = 0.0
+                    except Exception as e:
+                        print(f"OCR error for plate {plate_count}: {e}")
                         plate_text = ""
                         best_confidence = 0.0
-                except Exception as e:
-                    print(f"OCR error for plate {plate_count}: {e}")
-                    plate_text = ""
-                    best_confidence = 0.0
-                
-                # Save results to CSV
-                with open(csv_filename, 'a', newline='', encoding='utf-8') as csvfile:
-                    writer = csv.writer(csvfile)
-                    writer.writerow([
-                        f"plate_{plate_count}",
-                        plate_text if plate_text else "No text detected",
-                        f"{best_confidence:.3f}",
-                        plate_path
-                    ])
-                
-                # Draw the detected box
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                
-                # Add detected text to the image
-                if plate_text:
-                    display_text = f"{plate_text} ({best_confidence:.3f})"
-                    cv2.putText(img, display_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
-                    print(f"Frame {frame_count} - Detected plate #{plate_count}: {plate_text} (Confidence: {best_confidence:.3f})")
-                else:
-                    cv2.putText(img, "Plate Not Detected!", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
-                    print(f"Frame {frame_count} - Plate #{plate_count}: No text detected")
-                
-                plate_count += 1
-        
-        # Visualize results
-        annotated_frame = results[0].plot()
-        return annotated_frame
-    else:
-        # For frames we don't process, just return the original frame
-        return img
-
-# Video processing function
-def process_video(video_path, output_path):
-    cap = cv2.VideoCapture(video_path)
-
-    # Get video properties
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    # Start the video writer
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        # Process each frame
-        processed_frame = process_image(frame)
-        out.write(processed_frame)
-
-    # Release video resources
-    cap.release()
-    out.release()
-    cv2.destroyAllWindows()
-
-    print(f"Output video saved to {output_path}")
-
-def main(input_path, output_dir):
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    if input_path.endswith(('.jpg', '.jpeg', '.png')):
-        img = cv2.imread(input_path)
-        output_path = os.path.join(output_dir, 'result.jpg')
-        processed_img = process_image(img)
-        cv2.imwrite(output_path, processed_img)
-        plt.imshow(cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB))
-        plt.show()
-    elif input_path.endswith(('.mp4', '.avi', '.mov')):
-        output_path = os.path.join(output_dir, 'result_video.mp4')
-        process_video(input_path, output_path)
-
-    elif input_path == 'camera':
-        # Capture from camera
-        cap = cv2.VideoCapture(0)
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # Process each frame
-            processed_frame = process_image(frame)
-
-            # Show the processed frame
-            cv2.imshow('Live Feed', processed_frame)
-
-            # Break loop if 'q' is pressed
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-        cap.release()
-        cv2.destroyAllWindows()
-
-    elif input_path.startswith('rtsp://'):
-        # Capture from camera stream
-        while True:
-            try:
-                cap = cv2.VideoCapture(input_path)
-                if not cap.isOpened():
-                    raise ValueError("Camera connection failed.")
-
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        raise ValueError("Frame could not be read, stream ended.")
                     
-                    processed_frame = process_image(frame)
-                    cv2.imshow('Stream', processed_frame)
+                    # Save results to CSV
+                    with open(csv_filename, 'a', newline='', encoding='utf-8') as csvfile:
+                        writer = csv.writer(csvfile)
+                        writer.writerow([
+                            f"plate_{plate_count}",
+                            plate_text if plate_text else "No text detected",
+                            f"{best_confidence:.3f}",
+                            plate_path
+                        ])
+                    
+                    # Print the detected license plate number with detection confidence
+                    detection_conf = detection.confidence if hasattr(detection, 'confidence') else 0.0
+                    if plate_text:
+                        print(f"Frame {frame_count} - Detected plate #{plate_count}: {plate_text} (OCR: {best_confidence:.3f}, Detection: {detection_conf:.3f})")
+                    else:
+                        print(f"Frame {frame_count} - Plate #{plate_count}: No text detected (Detection: {detection_conf:.3f})")
+                    
+                    plate_count += 1
 
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
-
-                cap.release()
-                cv2.destroyAllWindows()
-                break  # Break loop to restart
-
-            except Exception as e:
-                print(f"An error occurred: {e}")
-                cap.release()
-                cv2.destroyAllWindows()
-                print("Waiting 5 seconds and reconnecting...")
-                time.sleep(5)  # Wait 5 seconds and retry
-
+        # Visualize results using open-image-models display method
+        if detections is not None and len(detections) > 0:
+            annotated_frame = model.display_predictions(frame)
+        else:
+            annotated_frame = frame
     else:
-        print("Unsupported input type.")
+        # For frames we don't process, just show the original frame
+        annotated_frame = frame    # Display
+    cv2.imshow("YOLOv9 License Plate Detection (Open Image Models)", annotated_frame)
 
-# Example usage for external camera stream
-input_path = rtsp_url
-output_dir = 'output_directory'
-main(input_path, output_dir)
+    # Press 'q' to exit
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
